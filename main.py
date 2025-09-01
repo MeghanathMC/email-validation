@@ -8,12 +8,23 @@ import whois
 from popular_domains import emailDomains
 import streamlit as st
 from streamlit_extras.metric_cards import style_metric_cards
+from dns_utils import check_auth_protocols
+from reputation_utils import lookup_dnsbl
+import greylist_retry  # noqa: F401 ensures background task starts
+from greylist_db import SYNC_DB_CONN
 
 st.set_page_config(
     page_title="Email verification",
     page_icon="✅",
     layout="centered",
 )
+
+st.sidebar.title("System Status")
+try:
+    pending_count = SYNC_DB_CONN.execute("SELECT COUNT(*) FROM greylist").fetchone()[0]
+except Exception:
+    pending_count = 0
+st.sidebar.metric("Greylist Queue", pending_count)
 
 def label_email(email):
     if not sc.is_valid_email(email):
@@ -155,6 +166,25 @@ def main():
                                 and not result['is Temporary']
                             )
 
+                            # Display status indicator at top-right
+                            if is_valid:
+                                status_label, status_icon, status_color = "Valid", "✅", "#28a745"
+                            elif result['smtpConnection'] is None:
+                                status_label, status_icon, status_color = "Greylisted", "⏳", "#ffc107"
+                            else:
+                                status_label, status_icon, status_color = "Invalid", "❌", "#dc3545"
+
+                            st.markdown(
+                                f"""
+                                <div style='display:flex;justify-content:flex-end;align-items:center;width:100%;'>
+                                    <span style='font-weight:bold;color:{status_color};margin-right:6px;'>
+                                        {status_label}
+                                    </span>
+                                    <span style='font-size:24px;'>{status_icon}</span>
+                                </div>
+                                """,
+                                unsafe_allow_html=True)
+
                             st.markdown("**Result:**")
 
                             # Display metric cards with reduced text size
@@ -164,8 +194,10 @@ def main():
                             col3.metric(label="Is Temporary", value=result['is Temporary'])
             
                             
-                            # Show SMTP connection status as a warning
-                            if not result['smtpConnection']:
+                            # Show SMTP connection status as a warning or pending
+                            if result['smtpConnection'] is None:
+                                st.info("Greylisted: retry scheduled")
+                            elif not result['smtpConnection']:
                                 st.warning("SMTP connection not established.")
                             
                             # Show domain details in an expander
@@ -185,6 +217,22 @@ def main():
                                 st.error(f"{email} is a Invalid email")
                                 if result['is Temporary']:
                                     st.text("It is a disposable email")
+
+                            # Authentication protocol check
+                            auth = check_auth_protocols(domain_part)
+                            result['auth'] = auth
+                            
+                            # Display new metrics
+                            col4, col5, col6 = st.columns(3)
+                            col4.metric(label="SPF", value=auth['spf'])
+                            col5.metric(label="DKIM", value=auth['dkim'])
+                            col6.metric(label="DMARC", value=auth['dmarc'])
+
+                            # IP Reputation metric
+                            reputation = not lookup_dnsbl(domain_part)
+                            col7, _ = st.columns([1,2])
+                            col7.metric(label="IP Reputation Clean", value=reputation)
+
 
     with t2:
         # Bulk email processing

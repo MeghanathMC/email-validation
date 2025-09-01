@@ -5,3 +5,9 @@ streamlit
 streamlit-extras
 jellyfish
 numpy
+email-validator
+pyspf
+dkimpy
+dmarc
+aiosmtplib
+aiosqlite
