@@ -19,6 +19,18 @@ st.set_page_config(
     layout="centered",
 )
 
+HIDE_TOOLBAR = """
+<style>
+/* Hide top-right toolbar controls */
+.css-18ni7ap.e8zbici2 {visibility:hidden;} /* Share button */
+button[kind="icon"] {display:none !important;} /* Edit / Star / GitHub icons */
+header {visibility:hidden;}  /* Manage app header */
+footer {visibility:hidden;}  /* Footer */
+.viewerBadge_container__ {display:none;}
+</style>
+"""
+st.markdown(HIDE_TOOLBAR, unsafe_allow_html=True)
+
 st.sidebar.title("System Status")
 try:
     pending_count = SYNC_DB_CONN.execute("SELECT COUNT(*) FROM greylist").fetchone()[0]
