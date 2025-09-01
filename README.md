@@ -11,10 +11,6 @@ This is a Streamlit application for email validation. The tool allows users to v
 ## Installation
 To run the Email Validation Tool locally, follow these steps:
 
-```
-Clone the repository:
-git clone https://github.com/sathish-1804/email_validation_tool.git
-
 Change the directory to the cloned repository:
 cd email_validation_tool
 
