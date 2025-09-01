@@ -27,6 +27,7 @@ button[kind="icon"] {display:none !important;} /* Edit / Star / GitHub icons */
 header {visibility:hidden;}  /* Manage app header */
 footer {visibility:hidden;}  /* Footer */
 .viewerBadge_container__ {display:none;}
+.stDeployButton, .stDeployButton:hover {visibility:hidden !important;}
 </style>
 """
 st.markdown(HIDE_TOOLBAR, unsafe_allow_html=True)
