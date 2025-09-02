@@ -96,15 +96,15 @@ def process_txt(input_file):
 
     for line in input_text:
         email = line.strip()
-        label = label_email(email)
-        results.append([email, label])
+        if email:  # Skip empty lines
+            label = label_email(email)
+            results.append([email, label])
 
     # Create a DataFrame for the results
     result_df = pd.DataFrame(results, columns=['Email', 'Label'])
     result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-
-    # Display the results in a table
-    st.dataframe(result_df)
+    
+    return result_df
 
 def main():
     with open('style.css') as f:
@@ -239,7 +239,27 @@ def main():
         if input_file:
             st.write("Processing...")
             if input_file.type == 'text/plain':
-                process_txt(input_file)
+                df = process_txt(input_file)
+                
+                # Success banner with download CTA
+                st.success(f"✅ Successfully processed {len(df)} emails")
+                
+                # Prominent download button
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col3:
+                    from datetime import datetime
+                    csv_data = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Results",
+                        data=csv_data,
+                        file_name=f"email_validation_{len(df)}_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                
+                st.markdown("**Results Preview:**")
+                st.dataframe(df)
             else:
                 df = process_csv(input_file)
                 
