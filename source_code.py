@@ -91,6 +91,7 @@ def verify_email(email):
         mx_records = dns.resolver.resolve(domain, 'MX')
     except dns.resolver.NoAnswer:
         return False
+    
     for mx in mx_records:
         host = str(mx.exchange).rstrip('.')
         try:
@@ -105,15 +106,18 @@ def verify_email(email):
                         server = smtplib.SMTP_SSL(host, 465, timeout=2)
                     except Exception:
                         continue
+            
             server.ehlo()
             server.mail('')
             code, _ = server.rcpt(email)
             server.quit()
+            
             if code == 250:
                 return True
             if 400 <= code < 500:  # greylist temporary failure
                 upsert_greylist_sync(email, host, retry_delay=600)
                 return None
+                
         except Exception:
             continue
     return False

@@ -55,12 +55,10 @@ def label_emails(input_file):
 
     if file_extension == 'csv':
         df = process_csv(input_file)
-    elif file_extension == 'xlsx':
-        df = process_xlsx(input_file)
     elif file_extension == 'txt':
         df = process_txt(input_file)
     else:
-        st.warning("Unsupported file format. Please provide a CSV, XLSX, or TXT file.")
+        st.warning("Unsupported file format. Please provide a CSV or TXT file.")
 
 
 def process_csv(input_file):
@@ -87,20 +85,7 @@ def process_csv(input_file):
     else:
         return pd.DataFrame(columns=['Email', 'Label'])
 
-def process_xlsx(input_file):
-    df = pd.read_excel(input_file, header=None)
-    results = []
 
-    for index, row in df.iterrows():
-        email = row[0].strip()
-        label = label_email(email)
-        results.append([email, label])
-
-    result_df = pd.DataFrame(results, columns=['Email', 'Label'])
-    result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-    
-    # Display the results in a table
-    st.dataframe(result_df)
 
 
 def process_txt(input_file):
@@ -250,14 +235,32 @@ def main():
     with t2:
         # Bulk email processing
         st.header("Bulk Email Processing")
-        input_file = st.file_uploader("Upload a CSV, XLSX, or TXT file", type=["csv", "xlsx", "txt"])
+        input_file = st.file_uploader("Upload a CSV or TXT file for faster results", type=["csv", "txt"])
         if input_file:
             st.write("Processing...")
             if input_file.type == 'text/plain':
                 process_txt(input_file)
             else:
                 df = process_csv(input_file)
-                st.success("Processing completed. Displaying results:")
+                
+                # Success banner with download CTA
+                st.success(f"✅ Processing completed! {len(df)} emails validated")
+                
+                # Prominent download button
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col3:
+                    from datetime import datetime
+                    csv_data = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Results",
+                        data=csv_data,
+                        file_name=f"email_validation_{len(df)}_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                
+                st.markdown("**Results Preview:**")
                 st.dataframe(df)
 
 
