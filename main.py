@@ -8,12 +8,36 @@ import whois
 from popular_domains import emailDomains
 import streamlit as st
 from streamlit_extras.metric_cards import style_metric_cards
+from dns_utils import check_auth_protocols
+from reputation_utils import lookup_dnsbl
+import greylist_retry  # noqa: F401 ensures background task starts
+from greylist_db import SYNC_DB_CONN
 
 st.set_page_config(
     page_title="Email verification",
     page_icon="✅",
     layout="centered",
 )
+
+HIDE_TOOLBAR = """
+<style>
+/* Hide top-right toolbar controls */
+.css-18ni7ap.e8zbici2 {visibility:hidden;} /* Share button */
+button[kind="icon"] {display:none !important;} /* Edit / Star / GitHub icons */
+header {visibility:hidden;}  /* Manage app header */
+footer {visibility:hidden;}  /* Footer */
+.viewerBadge_container__ {display:none;}
+.stDeployButton, .stDeployButton:hover {visibility:hidden !important;}
+</style>
+"""
+st.markdown(HIDE_TOOLBAR, unsafe_allow_html=True)
+
+st.sidebar.title("System Status")
+try:
+    pending_count = SYNC_DB_CONN.execute("SELECT COUNT(*) FROM greylist").fetchone()[0]
+except Exception:
+    pending_count = 0
+st.sidebar.metric("Greylist Queue", pending_count)
 
 def label_email(email):
     if not sc.is_valid_email(email):
@@ -31,12 +55,10 @@ def label_emails(input_file):
 
     if file_extension == 'csv':
         df = process_csv(input_file)
-    elif file_extension == 'xlsx':
-        df = process_xlsx(input_file)
     elif file_extension == 'txt':
         df = process_txt(input_file)
     else:
-        st.warning("Unsupported file format. Please provide a CSV, XLSX, or TXT file.")
+        st.warning("Unsupported file format. Please provide a CSV or TXT file.")
 
 
 def process_csv(input_file):
@@ -63,20 +85,7 @@ def process_csv(input_file):
     else:
         return pd.DataFrame(columns=['Email', 'Label'])
 
-def process_xlsx(input_file):
-    df = pd.read_excel(input_file, header=None)
-    results = []
 
-    for index, row in df.iterrows():
-        email = row[0].strip()
-        label = label_email(email)
-        results.append([email, label])
-
-    result_df = pd.DataFrame(results, columns=['Email', 'Label'])
-    result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-    
-    # Display the results in a table
-    st.dataframe(result_df)
 
 
 def process_txt(input_file):
@@ -87,15 +96,15 @@ def process_txt(input_file):
 
     for line in input_text:
         email = line.strip()
-        label = label_email(email)
-        results.append([email, label])
+        if email:  # Skip empty lines
+            label = label_email(email)
+            results.append([email, label])
 
     # Create a DataFrame for the results
     result_df = pd.DataFrame(results, columns=['Email', 'Label'])
     result_df.index = range(1, len(result_df) + 1)  # Starting index from 1
-
-    # Display the results in a table
-    st.dataframe(result_df)
+    
+    return result_df
 
 def main():
     with open('style.css') as f:
@@ -155,6 +164,25 @@ def main():
                                 and not result['is Temporary']
                             )
 
+                            # Display status indicator at top-right
+                            if is_valid:
+                                status_label, status_icon, status_color = "Valid", "✅", "#28a745"
+                            elif result['smtpConnection'] is None:
+                                status_label, status_icon, status_color = "Greylisted", "⏳", "#ffc107"
+                            else:
+                                status_label, status_icon, status_color = "Invalid", "❌", "#dc3545"
+
+                            st.markdown(
+                                f"""
+                                <div style='display:flex;justify-content:flex-end;align-items:center;width:100%;'>
+                                    <span style='font-weight:bold;color:{status_color};margin-right:6px;'>
+                                        {status_label}
+                                    </span>
+                                    <span style='font-size:24px;'>{status_icon}</span>
+                                </div>
+                                """,
+                                unsafe_allow_html=True)
+
                             st.markdown("**Result:**")
 
                             # Display metric cards with reduced text size
@@ -164,8 +192,10 @@ def main():
                             col3.metric(label="Is Temporary", value=result['is Temporary'])
             
                             
-                            # Show SMTP connection status as a warning
-                            if not result['smtpConnection']:
+                            # Show SMTP connection status as a warning or pending
+                            if result['smtpConnection'] is None:
+                                st.info("Greylisted: retry scheduled")
+                            elif not result['smtpConnection']:
                                 st.warning("SMTP connection not established.")
                             
                             # Show domain details in an expander
@@ -186,17 +216,71 @@ def main():
                                 if result['is Temporary']:
                                     st.text("It is a disposable email")
 
+                            # Authentication protocol check
+                            auth = check_auth_protocols(domain_part)
+                            result['auth'] = auth
+                            
+                            # Display new metrics
+                            col4, col5, col6 = st.columns(3)
+                            col4.metric(label="SPF", value=auth['spf'])
+                            col5.metric(label="DKIM", value=auth['dkim'])
+                            col6.metric(label="DMARC", value=auth['dmarc'])
+
+                            # IP Reputation metric
+                            reputation = not lookup_dnsbl(domain_part)
+                            col7, _ = st.columns([1,2])
+                            col7.metric(label="IP Reputation Clean", value=reputation)
+
+
     with t2:
         # Bulk email processing
         st.header("Bulk Email Processing")
-        input_file = st.file_uploader("Upload a CSV, XLSX, or TXT file", type=["csv", "xlsx", "txt"])
+        input_file = st.file_uploader("Upload a CSV or TXT file for faster results", type=["csv", "txt"])
         if input_file:
             st.write("Processing...")
             if input_file.type == 'text/plain':
-                process_txt(input_file)
+                df = process_txt(input_file)
+                
+                # Success banner with download CTA
+                st.success(f"✅ Successfully processed {len(df)} emails")
+                
+                # Prominent download button
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col3:
+                    from datetime import datetime
+                    csv_data = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Results",
+                        data=csv_data,
+                        file_name=f"email_validation_{len(df)}_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                
+                st.markdown("**Results Preview:**")
+                st.dataframe(df)
             else:
                 df = process_csv(input_file)
-                st.success("Processing completed. Displaying results:")
+                
+                # Success banner with download CTA
+                st.success(f"✅ Processing completed! {len(df)} emails validated")
+                
+                # Prominent download button
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col3:
+                    from datetime import datetime
+                    csv_data = df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Results",
+                        data=csv_data,
+                        file_name=f"email_validation_{len(df)}_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                
+                st.markdown("**Results Preview:**")
                 st.dataframe(df)
 
 

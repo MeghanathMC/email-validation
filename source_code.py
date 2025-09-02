@@ -5,6 +5,12 @@ import requests
 import threading
 import queue
 import dns.reversename
+from email_validator import validate_email, EmailNotValidError
+from dns_utils import has_spf, has_dmarc, has_dkim
+import socket
+from reputation_utils import lookup_dnsbl
+from disposable_cache import load_disposable_domains
+from greylist_db import upsert_greylist_sync
 
 CACHE_TTL = 600
 
@@ -14,44 +20,13 @@ resolver.nameservers = ['8.8.8.8']
 resolver.cache = dns.resolver.Cache()
 
 
-# def is_valid_email(email):
-#     # Check if "@" is present in the email
-#     if "@" not in email:
-#         return False
-
-#     local_part, domain_part = email.split('@')
-
-#     # Check for consecutive dots, hyphens, or underscores in the local part
-#     if re.search(r'\.{2}|-{2}|_{2}', local_part):
-#         return False
-
-#     # Check for consecutive dots, hyphens, or underscores in the domain part
-#     if re.search(r'\.{2}|-{2}|_{2}', domain_part):
-#         return False
-
-#     # Check for two consecutive dots, hyphens, or underscores anywhere in the email
-#     if re.search(r'\.\-|\-\.|\.\.|\_\-|\-\_|\_\_|\.\.|--', email):
-#         return False
-
-#     # Validate email syntax
-#     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-#     return re.match(pattern, email) is not None
-
-def is_valid_email(email):
-    # Comprehensive regex for email validation
-    pattern = r'''
-        ^                         # Start of string
-        (?!.*[._%+-]{2})          # No consecutive special characters
-        [a-zA-Z0-9._%+-]{1,64}    # Local part: allowed characters and length limit
-        (?<![._%+-])              # No special characters at the end of local part
-        @                         # "@" symbol
-        [a-zA-Z0-9.-]+            # Domain part: allowed characters
-        (?<![.-])                 # No special characters at the end of domain
-        \.[a-zA-Z]{2,}$           # Top-level domain with minimum 2 characters
-    '''
-    
-    # Match the entire email against the pattern
-    return re.match(pattern, email, re.VERBOSE) is not None
+def is_valid_email(email: str) -> bool:
+    """RFC-compliant syntax validation using email_validator package."""
+    try:
+        validate_email(email, check_deliverability=False)
+        return True
+    except EmailNotValidError:
+        return False
 
 # mx record validation
 # Set the cache TTL (in seconds)
@@ -110,43 +85,69 @@ def has_valid_mx_record(domain):
 
 # smtp connection
 def verify_email(email):
-    # Split the email address into username and domain parts
+    """Return True if mailbox exists, False if definitely invalid, None if greylisted/pending."""
     domain = email.split('@')[1]
-
-    # Check the domain MX records
     try:
         mx_records = dns.resolver.resolve(domain, 'MX')
     except dns.resolver.NoAnswer:
         return False
-
-    # Connect to the SMTP server and perform the email verification
+    
     for mx in mx_records:
+        host = str(mx.exchange).rstrip('.')
         try:
-            smtp_server = smtplib.SMTP(str(mx.exchange))
-            smtp_server.ehlo()
-            smtp_server.mail('')
-            code, message = smtp_server.rcpt(str(email))
-            smtp_server.quit()
+            try:
+                server = smtplib.SMTP(host, 587, timeout=2)
+                server.starttls()
+            except (socket.gaierror, smtplib.SMTPConnectError, OSError):
+                try:
+                    server = smtplib.SMTP(host, 25, timeout=2)
+                except (socket.gaierror, smtplib.SMTPConnectError, OSError):
+                    try:
+                        server = smtplib.SMTP_SSL(host, 465, timeout=2)
+                    except Exception:
+                        continue
+            
+            server.ehlo()
+            server.mail('')
+            code, _ = server.rcpt(email)
+            server.quit()
+            
             if code == 250:
                 return True
-        except:
-            pass
-
+            if 400 <= code < 500:  # greylist temporary failure
+                upsert_greylist_sync(email, host, retry_delay=600)
+                return None
+                
+        except Exception:
+            continue
     return False
 
 
 # temporary domain
 def is_disposable(domain):
-    blacklists = [
-        'https://raw.githubusercontent.com/andreis/disposable-email-domains/master/domains.txt',
-        'https://raw.githubusercontent.com/wesbos/burner-email-providers/master/emails.txt'
-    ]
+    disposable_set = load_disposable_domains()
+    return domain.lower() in disposable_set
 
-    for blacklist_url in blacklists:
-        try:
-            blacklist = set(requests.get(blacklist_url).text.strip().split('\n'))
-            if domain in blacklist:
-                return True
-        except Exception as e:
-            print(f'Error loading blacklist {blacklist_url}: {e}')
-    return False
+
+def check_mx_reputation(domain):
+    """Return 'Bad' if any MX IP is listed in DNSBL, else 'Normal'"""
+    try:
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        for mx in mx_records:
+            host = str(mx.exchange).rstrip('.')
+            ips = dns.resolver.resolve(host, 'A')
+            for ip in ips:
+                if lookup_dnsbl(ip.to_text()):
+                    return 'Bad'
+    except Exception:
+        pass
+    return 'Normal'
+
+
+def check_auth_protocols(domain: str):
+    """Return dict with SPF, DKIM, DMARC boolean presence."""
+    return {
+        'spf': has_spf(domain),
+        'dkim': has_dkim(domain),
+        'dmarc': has_dmarc(domain)
+    }
